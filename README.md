@@ -1,5 +1,7 @@
 # 🔌 WOL-Bot
 
+![WOL-Bot Banner](./assets/banner.png)
+
 A Discord bot for Wake-on-LAN and remote power management of homelab servers, with an interactive control panel and automated wake/shutdown scheduling.
 
 ## ✨ Key Features
