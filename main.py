@@ -338,10 +338,6 @@ async def schedule_loop():
                 wake_t = parse_hhmm(cfg["wake_time"])
                 shut_t = parse_hhmm(cfg["shutdown_time"])
 
-                # Ventana de aviso: shutdown_time − SHUTDOWN_WARN_SECS
-                warn_dt = datetime.combine(now.date(), shut_t) - timedelta(seconds=SHUTDOWN_WARN_SECS)
-                warn_t  = warn_dt.time()
-
                 # ── ENCENDIDO ──
                 if now.time() >= wake_t and cfg.get("last_wake_date") != today:
                     cfg["last_wake_date"] = today
@@ -385,14 +381,27 @@ async def schedule_loop():
                                 )
 
                 # ── APAGADO ──
-                if (
-                    now.time() >= warn_t
-                    and cfg.get("last_shutdown_date") != today
-                    and cfg.get("shutdown_cancelled_date") != today
-                ):
-                    cfg["last_shutdown_date"] = today
-                    save_schedule(cfg)
-                    asyncio.create_task(run_shutdown_warning(cfg, today))
+                # El apagado se ancla a la FECHA real del último encendido, no a
+                # "hoy a las shut_t". Si shutdown_time <= wake_time la ventana cruza
+                # medianoche (ej: enciende 12:00, apaga 01:00 del día siguiente) y el
+                # apagado cae al día siguiente. Comparar solo la hora del día hacía
+                # que 'now.time() >= warn_t' fuera verdadero TODO el día en ese caso,
+                # disparando el apagado apenas se guardaba el horario.
+                last_wake = cfg.get("last_wake_date")
+                if last_wake:
+                    shutdown_dt = datetime.combine(date.fromisoformat(last_wake), shut_t)
+                    if shut_t <= wake_t:
+                        shutdown_dt += timedelta(days=1)
+                    warn_dt = shutdown_dt - timedelta(seconds=SHUTDOWN_WARN_SECS)
+
+                    if (
+                        now >= warn_dt
+                        and cfg.get("last_shutdown_date") != today
+                        and cfg.get("shutdown_cancelled_date") != today
+                    ):
+                        cfg["last_shutdown_date"] = today
+                        save_schedule(cfg)
+                        asyncio.create_task(run_shutdown_warning(cfg, today))
 
         except Exception as e:
             print(f"[schedule_loop] Excepción: {e}")
