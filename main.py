@@ -1,4 +1,3 @@
-# deploy-test 2026-07-08: no-op para validar auto-update por timer en el Arch. Seguro de borrar.
 import discord
 import asyncio
 import subprocess
