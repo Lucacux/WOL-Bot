@@ -7,8 +7,9 @@ A Discord bot for Wake-on-LAN and remote power management of homelab servers, wi
 ## ✨ Key Features
 
 - **Interactive control panel (`/wol`):** buttons to wake, shut down, or check the real-time status (online/offline) of each configured server.
-- **Remote shutdown & reboot via SSH:** sends `sudo shutdown -h now` / `sudo shutdown -r now` over SSH to servers that support it.
+- **Remote shutdown & reboot via SSH (`/shutdown`, `/reboot`):** interactive panels to power off or restart any ONLINE server with a confirmation step and live progress monitoring; sends `sudo shutdown -h now` / `sudo shutdown -r now` over SSH.
 - **Automated power scheduling (`/schedule`):** configurable daily wake and shutdown times for the media server.
+- **Failsafe watchdog:** if the media server is down during the hours it should be online (its `/schedule` window), the bot automatically re-sends WOL with debounced, low-impact ICMP checks and exponential-ish backoff — recovering from crashes or power outages with minimal downtime. Toggleable from the `/schedule` panel.
 - **Multi-server support:** tracks multiple homelab nodes (NAS, media server) with independent MAC/IP/SSH configuration per server.
 
 ## 🧰 Stack

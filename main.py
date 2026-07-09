@@ -4,6 +4,7 @@ import subprocess
 import os
 import sys
 import json
+import time as _time
 from datetime import datetime, time as dtime, date, timedelta
 from dotenv import load_dotenv
 
@@ -62,7 +63,29 @@ DEFAULT_SCHEDULE = {
     "last_wake_date":          None,
     "last_shutdown_date":      None,
     "shutdown_cancelled_date": None,
+    "failsafe_enabled":        True,   # watchdog WOL dentro de la franja activa
 }
+
+# ──────────────────────────────────────────
+# FAILSAFE CONFIG (watchdog de encendido)
+# ──────────────────────────────────────────
+# Si el Homeserver Multimedia está caído dentro de su franja "debería-estar-
+# encendido" (wake_time → shutdown_time), el failsafe reenvía WOL solo.
+# Ping controlado: en estado normal es 1 paquete ICMP cada FAILSAFE_CHECK_SECS.
+# Solo escala a varios pings cuando el primero falla, para confirmar la caída.
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+FAILSAFE_CHECK_SECS     = _env_int('FAILSAFE_CHECK_SECS', 60)    # cadencia del watchdog
+FAILSAFE_CONFIRM_CHECKS = _env_int('FAILSAFE_CONFIRM_CHECKS', 3) # pings consecutivos fallidos = caída
+FAILSAFE_CONFIRM_GAP    = _env_int('FAILSAFE_CONFIRM_GAP', 5)    # segundos entre pings de confirmación
+FAILSAFE_WOL_COOLDOWN   = _env_int('FAILSAFE_WOL_COOLDOWN', 180) # espera tras un WOL (deja bootear)
+FAILSAFE_MAX_FAST_TRIES = _env_int('FAILSAFE_MAX_FAST_TRIES', 3) # intentos antes de pasar a modo lento
+FAILSAFE_SLOW_COOLDOWN  = _env_int('FAILSAFE_SLOW_COOLDOWN', 600)# cooldown en modo lento (ej. apagón)
+FAILSAFE_BOOT_GRACE     = _env_int('FAILSAFE_BOOT_GRACE', 150)   # gracia al entrar en franja / reinicio
 
 # ──────────────────────────────────────────
 # SCHEDULE — persistencia
@@ -117,6 +140,34 @@ def send_wol(mac: str) -> bool:
 async def check_status(ip: str) -> bool:
     return await asyncio.to_thread(ping, ip)
 
+def in_uptime_window(now_t: dtime, wake_t: dtime, shut_t: dtime) -> bool:
+    """¿Está `now_t` dentro de la franja en la que el server debería estar ON?
+
+    Ventana [wake_t, shut_t). Si shut_t <= wake_t la franja cruza medianoche
+    (coherente con la lógica de apagado). shut_t == wake_t ⇒ 24h (siempre ON).
+    """
+    if shut_t == wake_t:
+        return True
+    if wake_t < shut_t:
+        return wake_t <= now_t < shut_t
+    return now_t >= wake_t or now_t < shut_t
+
+async def is_media_down() -> bool:
+    """Detección de caída con debounce del Homeserver Multimedia.
+
+    Devuelve True solo tras FAILSAFE_CONFIRM_CHECKS pings consecutivos fallidos.
+    En estado normal (server ONLINE) el primer ping responde y sale con 1 solo
+    paquete → impacto de red despreciable. Solo cuando está caído escala a
+    varios pings espaciados para confirmar y evitar falsos positivos.
+    """
+    ip = SERVERS["media"]["ip"]
+    for i in range(FAILSAFE_CONFIRM_CHECKS):
+        if await check_status(ip):
+            return False
+        if i < FAILSAFE_CONFIRM_CHECKS - 1:
+            await asyncio.sleep(FAILSAFE_CONFIRM_GAP)
+    return True
+
 async def ssh_shutdown_media() -> bool:
     cmd = [
         "ssh",
@@ -157,6 +208,11 @@ async def ssh_reboot(server_key: str) -> bool:
     # 'shutdown -r now' en vez de 'reboot' para reutilizar el mismo
     # NOPASSWD de sudo que ya tenés configurado para el apagado.
     return await ssh_run(server_key, "sudo shutdown -r now")
+
+async def ssh_shutdown(server_key: str) -> bool:
+    # Apagado genérico por servidor (mismo NOPASSWD de sudo que el reboot).
+    # ssh_shutdown_media() sigue existiendo aparte para el apagado programado.
+    return await ssh_run(server_key, "sudo shutdown -h now")
 
 def status_line(online: bool) -> str:
     return "🟢 ONLINE" if online else "🔴 OFFLINE"
@@ -208,6 +264,16 @@ def build_schedule_embed(cfg: dict) -> discord.Embed:
         notes.append("Sin acciones ejecutadas hoy")
 
     embed.add_field(name="📋  Actividad de hoy", value="\n".join(notes), inline=False)
+
+    fs = cfg.get("failsafe_enabled", True)
+    embed.add_field(
+        name="🛟  Failsafe (watchdog WOL)",
+        value=(
+            f"{'🟢 **Activo**' if fs else '⏸️  **Pausado**'} — reenciende solo el "
+            f"servidor si se cae dentro de la franja `{cfg['wake_time']}`–`{cfg['shutdown_time']}`."
+        ),
+        inline=False,
+    )
     embed.set_footer(text="Solo aplica al Homeserver Multimedia")
     return embed
 
@@ -409,6 +475,149 @@ async def schedule_loop():
         await asyncio.sleep(SCHEDULE_CHECK_SECS)
 
 # ──────────────────────────────────────────
+# FAILSAFE — watchdog de encendido (background task)
+# ──────────────────────────────────────────
+# Vigila que el Homeserver Multimedia esté ONLINE dentro de su franja activa.
+# Si lo encuentra caído, reenvía WOL con backoff para minimizar downtime sin
+# saturar la red ni el canal de Discord.
+_failsafe = {
+    "active":        False,   # hay una caída en curso siendo atendida
+    "outage_start":  None,    # _time.monotonic() del inicio de la caída
+    "last_wol":      None,    # _time.monotonic() del último WOL enviado
+    "attempts":      0,       # WOLs enviados en esta caída
+    "window_since":  None,    # _time.monotonic() en que entramos a la franja
+}
+
+def _reset_failsafe(keep_window: bool = False):
+    win = _failsafe["window_since"] if keep_window else None
+    _failsafe.update(active=False, outage_start=None, last_wol=None,
+                     attempts=0, window_since=win)
+
+def build_failsafe_alert_embed(attempt: int, wol_ok: bool, slow_mode: bool) -> discord.Embed:
+    srv = SERVERS["media"]
+    if not wol_ok:
+        return discord.Embed(
+            title="❌  Failsafe: no se pudo enviar WOL",
+            description=(
+                f"**{srv['name']}** está caído en su franja activa, pero falló el "
+                f"magic packet. Verificá que `wakeonlan` esté instalado."
+            ),
+            color=0xff0000,
+            timestamp=datetime.now(),
+        )
+    embed = discord.Embed(
+        title="🛟  Failsafe activado — reenviando WOL",
+        description=(
+            f"**{srv['name']}** (`{srv['ip']}`) debería estar encendido y no "
+            f"responde. Se envió un magic packet automático."
+        ),
+        color=0xe67e22 if not slow_mode else 0xf1c40f,
+        timestamp=datetime.now(),
+    )
+    embed.add_field(name="MAC",     value=f"`{srv['mac']}`", inline=True)
+    embed.add_field(name="Intento", value=f"`#{attempt}`",  inline=True)
+    if slow_mode:
+        embed.add_field(
+            name="Modo",
+            value=f"`lento` — reintenta cada {FAILSAFE_SLOW_COOLDOWN // 60} min",
+            inline=True,
+        )
+        embed.set_footer(text="Sin respuesta tras varios intentos (¿apagón?). Seguirá vigilando.")
+    else:
+        embed.set_footer(text="Monitoreando la recuperación...")
+    return embed
+
+def build_failsafe_recovered_embed(downtime_secs: float, attempts: int) -> discord.Embed:
+    mins = int(downtime_secs // 60)
+    secs = int(downtime_secs % 60)
+    return discord.Embed(
+        title=f"✅  Failsafe: {SERVERS['media']['name']} recuperado",
+        description=(
+            f"El servidor volvió a estar ONLINE tras `{mins:02d}:{secs:02d}` "
+            f"de caída y **{attempts}** intento(s) de WOL."
+        ),
+        color=0x2ecc71,
+        timestamp=datetime.now(),
+    )
+
+async def failsafe_loop():
+    await bot.wait_until_ready()
+    print("[failsafe] Loop iniciado.")
+
+    while not bot.is_closed():
+        try:
+            cfg = load_schedule()
+
+            active_window = bool(
+                cfg.get("enabled")
+                and cfg.get("failsafe_enabled", True)
+                and in_uptime_window(
+                    datetime.now().time(),
+                    parse_hhmm(cfg["wake_time"]),
+                    parse_hhmm(cfg["shutdown_time"]),
+                )
+            )
+
+            if not active_window:
+                # Fuera de franja (o failsafe/schedule pausado): no vigilamos.
+                if _failsafe["active"] or _failsafe["window_since"] is not None:
+                    _reset_failsafe()
+                await asyncio.sleep(FAILSAFE_CHECK_SECS)
+                continue
+
+            # Marca de entrada a la franja (para la gracia de arranque).
+            if _failsafe["window_since"] is None:
+                _failsafe["window_since"] = _time.monotonic()
+
+            down = await is_media_down()
+
+            if not down:
+                # ONLINE. Si veníamos de una caída atendida → avisar recuperación.
+                if _failsafe["active"]:
+                    channel = bot.get_channel(CHANNEL_ID)
+                    if channel:
+                        downtime = _time.monotonic() - (_failsafe["outage_start"] or _time.monotonic())
+                        await channel.send(embed=build_failsafe_recovered_embed(
+                            downtime, _failsafe["attempts"],
+                        ))
+                _reset_failsafe(keep_window=True)
+                await asyncio.sleep(FAILSAFE_CHECK_SECS)
+                continue
+
+            # ── CAÍDA CONFIRMADA dentro de la franja ──
+            now_m = _time.monotonic()
+
+            # Gracia al recién entrar en franja (o tras reiniciar el bot): dejamos
+            # que el encendido programado (schedule_loop) y el boot ocurran sin
+            # duplicar el WOL ni gritar una falsa alarma.
+            if now_m - _failsafe["window_since"] < FAILSAFE_BOOT_GRACE:
+                await asyncio.sleep(FAILSAFE_CHECK_SECS)
+                continue
+
+            if not _failsafe["active"]:
+                _failsafe["active"]       = True
+                _failsafe["outage_start"] = now_m
+
+            slow_mode = _failsafe["attempts"] >= FAILSAFE_MAX_FAST_TRIES
+            cooldown  = FAILSAFE_SLOW_COOLDOWN if slow_mode else FAILSAFE_WOL_COOLDOWN
+            due = _failsafe["last_wol"] is None or (now_m - _failsafe["last_wol"]) >= cooldown
+
+            if due:
+                wol_ok = await asyncio.to_thread(send_wol, SERVERS["media"]["mac"])
+                _failsafe["last_wol"] = now_m
+                _failsafe["attempts"] += 1
+                channel = bot.get_channel(CHANNEL_ID)
+                if channel:
+                    await channel.send(embed=build_failsafe_alert_embed(
+                        _failsafe["attempts"], wol_ok, slow_mode,
+                    ))
+
+        except Exception as e:
+            print(f"[failsafe_loop] Excepción: {e}")
+
+        await asyncio.sleep(FAILSAFE_CHECK_SECS)
+
+# ──────────────────────────────────────────
 # MODALS — editar horas
 # ──────────────────────────────────────────
 class TimeInputModal(discord.ui.Modal):
@@ -487,10 +696,19 @@ class SchedulePanel(discord.ui.View):
         btn_shut.callback = self._set_shutdown
         self.add_item(btn_shut)
 
+        fs_enabled = self.cfg.get("failsafe_enabled", True)
+        btn_failsafe = discord.ui.Button(
+            label="🛟  Pausar failsafe" if fs_enabled else "🛟  Activar failsafe",
+            style=discord.ButtonStyle.danger if fs_enabled else discord.ButtonStyle.success,
+            row=2,
+        )
+        btn_failsafe.callback = self._toggle_failsafe
+        self.add_item(btn_failsafe)
+
         btn_reset = discord.ui.Button(
             label="🔄  Resetear estado de hoy",
             style=discord.ButtonStyle.secondary,
-            row=2,
+            row=3,
         )
         btn_reset.callback = self._reset_today
         self.add_item(btn_reset)
@@ -498,6 +716,14 @@ class SchedulePanel(discord.ui.View):
     async def _toggle(self, interaction: discord.Interaction):
         cfg = load_schedule()
         cfg["enabled"] = not cfg["enabled"]
+        save_schedule(cfg)
+        self.cfg = cfg
+        self._build_buttons()
+        await interaction.response.edit_message(embed=build_schedule_embed(cfg), view=self)
+
+    async def _toggle_failsafe(self, interaction: discord.Interaction):
+        cfg = load_schedule()
+        cfg["failsafe_enabled"] = not cfg.get("failsafe_enabled", True)
         save_schedule(cfg)
         self.cfg = cfg
         self._build_buttons()
@@ -644,6 +870,53 @@ async def monitor_reboot(message: discord.Message, server_key: str):
     ))
 
 # ──────────────────────────────────────────
+# SHUTDOWN MONITOR — una fase (espera que caiga)
+# ──────────────────────────────────────────
+async def monitor_shutdown(message: discord.Message, server_key: str):
+    srv   = SERVERS[server_key]
+    name  = srv["name"]
+    ip    = srv["ip"]
+    start = datetime.now()
+
+    DOWN_TIMEOUT = 120   # espera a que se apague
+
+    attempt = 0
+    while (datetime.now() - start).total_seconds() < DOWN_TIMEOUT:
+        attempt += 1
+        elapsed = int((datetime.now() - start).total_seconds())
+        online  = await check_status(ip)
+        filled  = min(12, attempt // 2)
+        bar     = "█" * filled + "░" * (12 - filled)
+
+        if not online:
+            await message.edit(embed=discord.Embed(
+                title=f"🔴  {name} apagado",
+                description=f"El servidor dejó de responder tras `{elapsed}s`.",
+                color=0x992d22,
+                timestamp=datetime.now(),
+            ))
+            return
+
+        embed = discord.Embed(
+            title=f"🌙  Apagando: {name}",
+            description="Esperando que el servidor se desconecte...",
+            color=0xe67e22,
+            timestamp=datetime.now(),
+        )
+        embed.add_field(name="IP",       value=f"`{ip}`",       inline=True)
+        embed.add_field(name="Tiempo",   value=f"`{elapsed}s`", inline=True)
+        embed.add_field(name="Progreso", value=f"`{bar}`",      inline=False)
+        await message.edit(embed=embed)
+        await asyncio.sleep(3)
+
+    await message.edit(embed=discord.Embed(
+        title=f"⚠️  {name} no se apagó",
+        description=f"Sigue respondiendo después de `{DOWN_TIMEOUT}s`. Verificá manualmente.",
+        color=0xff0000,
+        timestamp=datetime.now(),
+    ))
+
+# ──────────────────────────────────────────
 # VIEW — Confirmación de reinicio
 # ──────────────────────────────────────────
 class RebootConfirmView(discord.ui.View):
@@ -774,6 +1047,140 @@ class RebootPanel(discord.ui.View):
         await self._ask(interaction, "media")
 
 # ──────────────────────────────────────────
+# VIEW — Confirmación de apagado
+# ──────────────────────────────────────────
+class ShutdownConfirmView(discord.ui.View):
+    def __init__(self, server_key: str):
+        super().__init__(timeout=30)
+        self.server_key = server_key
+
+        confirm = discord.ui.Button(
+            label="✅  Confirmar apagado",
+            style=discord.ButtonStyle.danger,
+        )
+        confirm.callback = self._confirm
+        self.add_item(confirm)
+
+        cancel = discord.ui.Button(
+            label="Cancelar",
+            style=discord.ButtonStyle.secondary,
+        )
+        cancel.callback = self._cancel
+        self.add_item(cancel)
+
+    async def _confirm(self, interaction: discord.Interaction):
+        srv = SERVERS[self.server_key]
+
+        online = await check_status(srv["ip"])
+        if not online:
+            await interaction.response.edit_message(
+                embed=discord.Embed(
+                    title=f"ℹ️  {srv['name']} ya está OFFLINE",
+                    description="El servidor ya está apagado.",
+                    color=0x95a5a6,
+                ),
+                view=None,
+            )
+            return
+
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title=f"🌙  Enviando apagado → {srv['name']}",
+                description="Comando `sudo shutdown -h now` vía SSH...",
+                color=0xe67e22,
+                timestamp=datetime.now(),
+            ),
+            view=None,
+        )
+
+        ok = await ssh_shutdown(self.server_key)
+        if not ok:
+            await interaction.edit_original_response(embed=discord.Embed(
+                title="❌  Error al apagar",
+                description="No se pudo conectar por SSH. Verificá clave, puerto y permiso de sudo.",
+                color=0xff0000,
+                timestamp=datetime.now(),
+            ))
+            return
+
+        await interaction.edit_original_response(embed=discord.Embed(
+            title=f"📡  Apagado enviado → {srv['name']}",
+            description="Monitoreando la desconexión abajo 👇",
+            color=0x2ecc71,
+            timestamp=datetime.now(),
+        ))
+
+        monitor_msg = await interaction.channel.send(embed=discord.Embed(
+            title=f"🌙  Apagando: {srv['name']}",
+            color=0xe67e22,
+            timestamp=datetime.now(),
+        ))
+        asyncio.create_task(monitor_shutdown(monitor_msg, self.server_key))
+
+    async def _cancel(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            embed=discord.Embed(title="✖️  Apagado cancelado", color=0x95a5a6),
+            view=None,
+        )
+
+# ──────────────────────────────────────────
+# VIEW — Panel de apagado
+# ──────────────────────────────────────────
+class ShutdownPanel(discord.ui.View):
+    def __init__(self, nas_online: bool, media_online: bool):
+        super().__init__(timeout=300)
+        self.nas_online   = nas_online
+        self.media_online = media_online
+        self._build()
+
+    def _build(self):
+        self.clear_items()
+
+        nas_btn = discord.ui.Button(
+            label=f"Apagar {SERVERS['nas']['name']}" if self.nas_online
+                  else f"{SERVERS['nas']['name']} OFFLINE",
+            style=discord.ButtonStyle.danger if self.nas_online else discord.ButtonStyle.secondary,
+            emoji="🗄️",
+            disabled=not self.nas_online,
+        )
+        nas_btn.callback = self._shutdown_nas
+        self.add_item(nas_btn)
+
+        media_btn = discord.ui.Button(
+            label=f"Apagar {SERVERS['media']['name']}" if self.media_online
+                  else f"{SERVERS['media']['name']} OFFLINE",
+            style=discord.ButtonStyle.danger if self.media_online else discord.ButtonStyle.secondary,
+            emoji="📺",
+            disabled=not self.media_online,
+        )
+        media_btn.callback = self._shutdown_media
+        self.add_item(media_btn)
+
+    async def _ask(self, interaction: discord.Interaction, server_key: str):
+        srv = SERVERS[server_key]
+        note = ""
+        if server_key == "media":
+            note = "\n\n⚠️  El *failsafe* podría reencenderlo si estás dentro de la franja horaria. Pausalo desde `/schedule` si querés que quede apagado."
+        embed = discord.Embed(
+            title=f"⚠️  ¿Apagar {srv['name']}?",
+            description=(
+                f"Vas a enviar `sudo shutdown -h now` a **{srv['name']}** (`{srv['ip']}`).\n"
+                f"Se van a cortar sus servicios hasta que lo despiertes con WOL."
+                f"{note}"
+            ),
+            color=0xe67e22,
+        )
+        await interaction.response.send_message(
+            embed=embed, view=ShutdownConfirmView(server_key), ephemeral=True
+        )
+
+    async def _shutdown_nas(self, interaction: discord.Interaction):
+        await self._ask(interaction, "nas")
+
+    async def _shutdown_media(self, interaction: discord.Interaction):
+        await self._ask(interaction, "media")
+
+# ──────────────────────────────────────────
 # VIEW — Panel WOL principal
 # ──────────────────────────────────────────
 class WOLPanel(discord.ui.View):
@@ -880,6 +1287,7 @@ async def on_ready():
     print(f"WOL Bot ONLINE: {bot.user}")
     await tree.sync()
     asyncio.create_task(schedule_loop())
+    asyncio.create_task(failsafe_loop())
 
     channel = bot.get_channel(CHANNEL_ID)
     if not channel:
@@ -933,6 +1341,31 @@ async def reboot_command(interaction: discord.Interaction):
         inline=True,
     )
     view = RebootPanel(nas_online, media_online)
+    await interaction.response.send_message(embed=embed, view=view)
+
+@tree.command(name="shutdown", description="Apagar uno de los servidores (vía SSH)")
+async def shutdown_command(interaction: discord.Interaction):
+    nas_online, media_online = await asyncio.gather(
+        check_status(SERVERS["nas"]["ip"]),
+        check_status(SERVERS["media"]["ip"]),
+    )
+    embed = discord.Embed(
+        title="🌙  Shutdown Control",
+        description="Elegí el servidor a apagar. Solo se pueden apagar los ONLINE.",
+        color=0xe67e22,
+        timestamp=datetime.now(),
+    )
+    embed.add_field(
+        name=f"🗄️  {SERVERS['nas']['name']}",
+        value=f"{status_line(nas_online)}\n`{SERVERS['nas']['ip']}`",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"📺  {SERVERS['media']['name']}",
+        value=f"{status_line(media_online)}\n`{SERVERS['media']['ip']}`",
+        inline=True,
+    )
+    view = ShutdownPanel(nas_online, media_online)
     await interaction.response.send_message(embed=embed, view=view)
 
 # ──────────────────────────────────────────
