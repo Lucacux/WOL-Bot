@@ -55,6 +55,10 @@ SCHEDULE_FILE         = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 SCHEDULE_CHECK_SECS   = 30    # frecuencia del loop de verificación
 SHUTDOWN_WARN_SECS    = 120   # ventana de aviso antes del apagado (2 minutos)
 SHUTDOWN_WARN_REFRESH = 10    # refresca el countdown cada N segundos
+# Tope de retraso: si el bot estuvo caído durante toda la ventana y arranca
+# mucho después de la hora de apagado, NO disparamos un apagado sorpresa. Un
+# reinicio/deploy normal cae muy por debajo de esto; horas después, se descarta.
+SHUTDOWN_MAX_LATE_SECS = 2 * 3600  # 2 h
 
 DEFAULT_SCHEDULE = {
     "enabled":                 True,
@@ -251,15 +255,18 @@ def build_schedule_embed(cfg: dict) -> discord.Embed:
     embed.add_field(name="🌙  Apagado",    value=f"`{cfg['shutdown_time']}`", inline=True)
     embed.add_field(name="\u200b",         value="\u200b",                    inline=True)
 
-    today = date.today().isoformat()
+    # Las marcas de apagado/cancelado se anclan a la ventana (last_wake_date),
+    # así que las comparamos contra last_wake, no contra el día calendario.
+    today     = date.today().isoformat()
+    last_wake = cfg.get("last_wake_date")
     notes = []
-    if cfg.get("last_wake_date") == today:
+    if last_wake == today:
         notes.append("✅ WOL enviado hoy")
-    if cfg.get("last_shutdown_date") == today:
-        if cfg.get("shutdown_cancelled_date") == today:
+    if last_wake and cfg.get("last_shutdown_date") == last_wake:
+        if cfg.get("shutdown_cancelled_date") == last_wake:
             notes.append("⚠️  Apagado cancelado manualmente — se retoma mañana")
         else:
-            notes.append("✅ Apagado ejecutado hoy")
+            notes.append("✅ Apagado ejecutado")
     if not notes:
         notes.append("Sin acciones ejecutadas hoy")
 
@@ -318,7 +325,10 @@ class CancelShutdownView(discord.ui.View):
 # ──────────────────────────────────────────
 # SCHEDULE — aviso con countdown + apagado
 # ──────────────────────────────────────────
-async def run_shutdown_warning(cfg: dict, today: str):
+async def run_shutdown_warning(cfg: dict, anchor: str):
+    # `anchor` = fecha de la ventana (last_wake_date). Se usa para marcar la
+    # cancelación contra la MISMA ventana que el disparo, para que la guarda no
+    # se reabra al rotar el día calendario a medianoche.
     channel = bot.get_channel(CHANNEL_ID)
     if not channel:
         return
@@ -335,7 +345,7 @@ async def run_shutdown_warning(cfg: dict, today: str):
 
         if view.cancelled:
             cfg = load_schedule()
-            cfg["shutdown_cancelled_date"] = today
+            cfg["shutdown_cancelled_date"] = anchor
             save_schedule(cfg)
             await msg.edit(
                 embed=discord.Embed(
@@ -453,6 +463,13 @@ async def schedule_loop():
                 # apagado cae al día siguiente. Comparar solo la hora del día hacía
                 # que 'now.time() >= warn_t' fuera verdadero TODO el día en ese caso,
                 # disparando el apagado apenas se guardaba el horario.
+                #
+                # IMPORTANTE — las guardas de "ya resuelto" se anclan a la MISMA
+                # ventana (last_wake), NO a `today`. Antes se comparaban contra la
+                # fecha del calendario: a las 00:00 `today` rotaba y la guarda se
+                # reabría, re-disparando el apagado de una franja ya ejecutada o
+                # cancelada (bug: el server se apagaba solo a las 00:00). Al anclar
+                # a last_wake, el apagado de una ventana se resuelve una única vez.
                 last_wake = cfg.get("last_wake_date")
                 if last_wake:
                     shutdown_dt = datetime.combine(date.fromisoformat(last_wake), shut_t)
@@ -460,14 +477,23 @@ async def schedule_loop():
                         shutdown_dt += timedelta(days=1)
                     warn_dt = shutdown_dt - timedelta(seconds=SHUTDOWN_WARN_SECS)
 
-                    if (
-                        now >= warn_dt
-                        and cfg.get("last_shutdown_date") != today
-                        and cfg.get("shutdown_cancelled_date") != today
-                    ):
-                        cfg["last_shutdown_date"] = today
-                        save_schedule(cfg)
-                        asyncio.create_task(run_shutdown_warning(cfg, today))
+                    already_done      = cfg.get("last_shutdown_date")      == last_wake
+                    already_cancelled = cfg.get("shutdown_cancelled_date") == last_wake
+                    too_late          = now >= shutdown_dt + timedelta(seconds=SHUTDOWN_MAX_LATE_SECS)
+
+                    if now >= warn_dt and not already_done and not already_cancelled:
+                        if too_late:
+                            # El bot estuvo caído toda la ventana y arrancó horas
+                            # después: consumimos la franja sin apagar nada para no
+                            # sorprender con un apagado fuera de hora.
+                            cfg["last_shutdown_date"] = last_wake
+                            save_schedule(cfg)
+                            print(f"[schedule] Apagado de {last_wake} vencido "
+                                  f"(>{SHUTDOWN_MAX_LATE_SECS//3600}h tarde); se omite.")
+                        else:
+                            cfg["last_shutdown_date"] = last_wake
+                            save_schedule(cfg)
+                            asyncio.create_task(run_shutdown_warning(cfg, last_wake))
 
         except Exception as e:
             print(f"[schedule_loop] Excepción: {e}")
