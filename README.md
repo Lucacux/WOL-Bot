@@ -10,6 +10,7 @@ A Discord bot for Wake-on-LAN and remote power management of homelab servers, wi
 - **Remote shutdown & reboot via SSH (`/shutdown`, `/reboot`):** interactive panels to power off or restart any ONLINE server with a confirmation step and live progress monitoring; sends `sudo shutdown -h now` / `sudo shutdown -r now` over SSH.
 - **Automated power scheduling (`/schedule`), per server:** each server gets its own configurable daily wake and shutdown times. The `/schedule` panel has a server selector, so NAS and media (and any server you add) are managed independently. Schedules are **opt-in** — disabled by default, so a fresh deploy never powers a server off by surprise.
 - **Failsafe watchdog, per server:** if a server is down during the hours it should be online (its own `/schedule` window), the bot automatically re-sends WOL with debounced, low-impact ICMP checks and exponential-ish backoff — recovering from crashes or power outages with minimal downtime. Each server keeps its own failsafe state; toggleable from its `/schedule` panel.
+- **Maintenance coordination:** `wolctl.py` lets local automation wake a server with bounded retries and acquire expiring maintenance leases. While a lease is active, scheduled shutdown is postponed instead of interrupting Ansible or another long-running job.
 - **Multi-server support:** tracks multiple homelab nodes (NAS, media server) with independent MAC/IP/SSH configuration per server. Every feature iterates over the server list — adding a node is a config entry, not a code change.
 
 ## 🧰 Stack
@@ -30,6 +31,9 @@ WOL-Bot/
 ├── embeds.py      # todos los build_*_embed
 ├── monitors.py    # monitores de boot/reboot/shutdown (editan un mensaje)
 ├── scheduler.py   # persistencia schedule.json, schedule_loop y failsafe_loop
+├── maintenance.py # reservas IPC con TTL que bloquean apagados programados
+├── orchestrator.py# encendido con reintentos + espera de boot
+├── wolctl.py       # CLI local consumida por Updates-Bot
 ├── views.py       # todas las Views/Modals de discord.ui
 └── main.py        # crear bot, registrar comandos, run
 ```
@@ -49,6 +53,20 @@ python main.py
 ## ⚙️ Environment Variables
 
 See `.env.example` — bot token, reporting channel, network interface, and per-server name/MAC/IP/SSH configuration.
+
+## 🤝 Local automation contract
+
+Updates-Bot calls this repository's CLI instead of duplicating MAC addresses or
+Wake-on-LAN behavior:
+
+```bash
+./venv/bin/python wolctl.py maintenance-acquire nas --owner updates-bot-daily --ttl 10800
+./venv/bin/python wolctl.py ensure-online nas --attempts 3 --attempt-timeout 180 --boot-grace 90 --json
+./venv/bin/python wolctl.py maintenance-release nas --owner updates-bot-daily
+```
+
+Leases are local, owner-aware, and expire automatically. `maintenance.json` is
+runtime state and is intentionally ignored by Git.
 
 ## 📄 License
 

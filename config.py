@@ -9,6 +9,7 @@ resto del bot (paneles, horario, failsafe) itera sobre `SERVERS`, así que la
 lógica no hay que tocarla.
 """
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -79,6 +80,16 @@ SHUTDOWN_WARN_REFRESH = 10    # refresca el countdown cada N segundos
 # mucho después de la hora de apagado, NO disparamos un apagado sorpresa. Un
 # reinicio/deploy normal cae muy por debajo de esto; horas después, se descarta.
 SHUTDOWN_MAX_LATE_SECS = 2 * 3600  # 2 h
+
+# Reservas cooperativas para tareas externas (por ejemplo Updates-Bot). Una
+# reserva activa impide que el scheduler apague el servidor a mitad de una
+# operación. Tienen vencimiento obligatorio: si el cliente muere sin liberar,
+# el apagado vuelve a habilitarse solo.
+MAINTENANCE_FILE = os.getenv(
+    "MAINTENANCE_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "maintenance.json"),
+)
+MAINTENANCE_MAX_TTL_SECS = _env_int("MAINTENANCE_MAX_TTL_SECS", 6 * 3600)
 
 # Estado por servidor. `enabled` arranca en False: el horario es OPT-IN, así un
 # deploy nuevo nunca apaga un server por sorpresa. La instalación viva conserva

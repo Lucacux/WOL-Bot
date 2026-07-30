@@ -9,22 +9,24 @@ Ambos loops iteran sobre `config.SERVERS`: la lógica es idéntica para NAS y
 Media (y para cualquier server que agregues), cada uno con su propia config y
 su propio estado de failsafe.
 """
-import os
-import json
-import time as _time
 import asyncio
-from datetime import datetime, time as dtime, date, timedelta
+import json
+import os
+import time as _time
+from datetime import date, datetime, timedelta
+from datetime import time as dtime
 
 import discord
 
 import config
-from network import check_status, wake, is_server_down, ssh_shutdown
 from embeds import (
-    build_shutdown_warning_embed,
     build_failsafe_alert_embed,
     build_failsafe_recovered_embed,
+    build_shutdown_warning_embed,
 )
+from maintenance import active_lease
 from monitors import monitor_boot
+from network import check_status, is_server_down, ssh_shutdown, wake
 
 
 # ──────────────────────────────────────────
@@ -123,6 +125,28 @@ async def run_shutdown_warning(bot, server_key: str, cfg: dict, anchor: str):
     start = datetime.now()
 
     while True:
+        lease = active_lease(server_key)
+        if lease:
+            # La reserva pudo aparecer después de iniciar el countdown. Reabrimos
+            # la guarda para que el scheduler reevalúe al liberarse la reserva.
+            cur = load_schedule(server_key)
+            if cur.get("last_shutdown_date") == anchor:
+                cur["last_shutdown_date"] = None
+                save_schedule(server_key, cur)
+            await msg.edit(
+                embed=discord.Embed(
+                    title="🛠️  Apagado pospuesto por mantenimiento",
+                    description=(
+                        f"**{srv['name']}** está reservado por `{lease.owner}`.\n"
+                        "El horario se reevaluará cuando termine la operación."
+                    ),
+                    color=0xf1c40f,
+                    timestamp=datetime.now(),
+                ),
+                view=None,
+            )
+            return
+
         elapsed   = (datetime.now() - start).total_seconds()
         remaining = max(0.0, config.SHUTDOWN_WARN_SECS - elapsed)
 
@@ -247,6 +271,10 @@ async def _process_schedule(bot, server_key: str, cfg: dict, now: datetime) -> b
         too_late          = now >= shutdown_dt + timedelta(seconds=config.SHUTDOWN_MAX_LATE_SECS)
 
         if now >= warn_dt and not already_done and not already_cancelled:
+            # No consumimos la franja: al liberarse la reserva, el siguiente
+            # ciclo vuelve a evaluar y apaga normalmente si aún está a tiempo.
+            if active_lease(server_key):
+                return dirty
             if too_late:
                 # El bot estuvo caído toda la ventana y arrancó horas después:
                 # consumimos la franja sin apagar nada para no sorprender.

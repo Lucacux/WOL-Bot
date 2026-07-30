@@ -9,3 +9,5 @@ __pycache__/
 *.sqlite3
 .DS_Store
 schedule.json
+maintenance.json
+maintenance.json.lock
