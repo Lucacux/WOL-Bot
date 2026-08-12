@@ -8,7 +8,8 @@ import sys
 
 import config
 from maintenance import LeaseConflict, acquire_lease, active_lease, release_lease
-from orchestrator import ensure_online
+from orchestrator import ensure_online, restore_power_state
+from schedule_store import should_be_online
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -34,6 +35,24 @@ def _parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("maintenance-status", help="consultar una reserva")
     status.add_argument("server", choices=config.SERVERS)
+
+    restore = sub.add_parser(
+        "power-restore",
+        help="apagar un server que encendiste, si está fuera de su franja",
+    )
+    restore.add_argument("server", choices=config.SERVERS)
+    restore.add_argument(
+        "--owner",
+        default="",
+        help="ignorar la reserva propia con este owner (la de otro siempre bloquea)",
+    )
+    restore.add_argument("--json", action="store_true")
+
+    window = sub.add_parser(
+        "schedule-window",
+        help="¿el horario dice que este server debería estar encendido ahora?",
+    )
+    window.add_argument("server", choices=config.SERVERS)
     return parser
 
 
@@ -67,6 +86,21 @@ async def _run(args: argparse.Namespace) -> int:
         released = release_lease(args.server, args.owner)
         print(json.dumps({"server_key": args.server, "released": released}))
         return 0 if released else 6
+
+    if args.command == "power-restore":
+        result = await restore_power_state(args.server, owner=args.owner)
+        payload = result.as_dict()
+        print(json.dumps(payload) if args.json else payload["reason"])
+        return 0 if result.ok else 7
+
+    if args.command == "schedule-window":
+        expected, reason = should_be_online(args.server)
+        print(json.dumps({
+            "server_key": args.server,
+            "should_be_online": expected,
+            "reason": reason,
+        }))
+        return 0
 
     lease = active_lease(args.server)
     print(json.dumps(None if lease is None else {

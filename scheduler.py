@@ -10,11 +10,8 @@ Media (y para cualquier server que agregues), cada uno con su propia config y
 su propio estado de failsafe.
 """
 import asyncio
-import json
-import os
 import time as _time
 from datetime import date, datetime, timedelta
-from datetime import time as dtime
 
 import discord
 
@@ -27,83 +24,23 @@ from embeds import (
 from maintenance import active_lease
 from monitors import monitor_boot
 from network import check_status, is_server_down, ssh_shutdown, wake
+from schedule_store import (  # noqa: F401  (reexport para main.py y views.py)
+    in_uptime_window,
+    load_schedule,
+    load_schedules,
+    parse_hhmm,
+    save_schedule,
+    save_schedules,
+    should_be_online,
+)
 
 
 # ──────────────────────────────────────────
 # PERSISTENCIA — schedule.json (por servidor)
 # ──────────────────────────────────────────
-def _default_all() -> dict:
-    return {key: dict(config.DEFAULT_SERVER_SCHEDULE) for key in config.SERVERS}
-
-
-def load_schedules() -> dict:
-    """Devuelve {server_key: cfg} para TODOS los servidores.
-
-    Migra el formato viejo (un único dict plano con `wake_time`, `enabled`, …
-    que era solo del Homeserver Multimedia) al nuevo formato anidado por
-    servidor, sin perder la configuración viva. Todo server que falte en el
-    archivo se completa con DEFAULT_SERVER_SCHEDULE.
-    """
-    raw = {}
-    if config.SCHEDULE_FILE and os.path.exists(config.SCHEDULE_FILE):
-        try:
-            with open(config.SCHEDULE_FILE, encoding="utf-8") as f:
-                raw = json.load(f)
-        except Exception as e:
-            print(f"[schedule] Error leyendo {config.SCHEDULE_FILE}: {e}")
-            raw = {}
-
-    # Formato legado: dict plano con las claves de un schedule → era de "media".
-    if isinstance(raw, dict) and "wake_time" in raw:
-        raw = {"media": raw}
-
-    result = {}
-    for key in config.SERVERS:
-        cfg = dict(config.DEFAULT_SERVER_SCHEDULE)
-        stored = raw.get(key) if isinstance(raw, dict) else None
-        if isinstance(stored, dict):
-            cfg.update(stored)
-        result[key] = cfg
-    return result
-
-
-def save_schedules(all_cfg: dict):
-    with open(config.SCHEDULE_FILE, "w", encoding="utf-8") as f:
-        json.dump(all_cfg, f, indent=2, ensure_ascii=False)
-
-
-def load_schedule(server_key: str) -> dict:
-    return load_schedules()[server_key]
-
-
-def save_schedule(server_key: str, cfg: dict):
-    """Guarda la config de UN servidor haciendo read-merge para no pisar los
-    otros (los loops y las Views escriben poco y espaciado; el merge alcanza)."""
-    all_cfg = load_schedules()
-    all_cfg[server_key] = cfg
-    save_schedules(all_cfg)
-
-
-def parse_hhmm(t: str) -> dtime:
-    parts = t.strip().split(":")
-    if len(parts) != 2:
-        raise ValueError(f"Formato inválido: {t!r}")
-    return dtime(int(parts[0]), int(parts[1]))
-
-
-def in_uptime_window(now_t: dtime, wake_t: dtime, shut_t: dtime) -> bool:
-    """¿Está `now_t` dentro de la franja en la que el server debería estar ON?
-
-    Ventana [wake_t, shut_t). Si shut_t <= wake_t la franja cruza medianoche
-    (coherente con la lógica de apagado). shut_t == wake_t ⇒ 24h (siempre ON).
-    """
-    if shut_t == wake_t:
-        return True
-    if wake_t < shut_t:
-        return wake_t <= now_t < shut_t
-    return now_t >= wake_t or now_t < shut_t
-
-
+# Vive en schedule_store para que wolctl.py pueda consultar la franja sin
+# importar discord. Se reexporta acá porque main.py y views.py ya importaban
+# estos nombres desde scheduler.
 # ──────────────────────────────────────────
 # AVISO + APAGADO PROGRAMADO
 # ──────────────────────────────────────────
