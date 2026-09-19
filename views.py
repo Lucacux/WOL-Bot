@@ -12,7 +12,7 @@ import asyncio
 import discord
 
 import config
-from network import check_status, wake, ssh_reboot, ssh_shutdown
+from network import probe, wake, ssh_reboot, ssh_shutdown
 from embeds import (
     build_panel_embed,
     build_control_embed,
@@ -208,7 +208,7 @@ class RebootConfirmView(discord.ui.View):
     async def _confirm(self, interaction: discord.Interaction):
         srv = config.SERVERS[self.server_key]
 
-        if not await check_status(srv["ip"]):
+        if not await probe(self.server_key):
             await interaction.response.edit_message(
                 embed=discord.Embed(
                     title=f"ℹ️  {srv['name']} está OFFLINE",
@@ -222,7 +222,7 @@ class RebootConfirmView(discord.ui.View):
         await interaction.response.edit_message(
             embed=discord.Embed(
                 title=f"🔄  Enviando reinicio → {srv['name']}",
-                description="Comando `sudo shutdown -r now` vía SSH...",
+                description=f"Comando `{config.reboot_cmd(self.server_key)}` vía SSH...",
                 color=0xe67e22,
                 timestamp=datetime.now(),
             ),
@@ -314,7 +314,7 @@ class ShutdownConfirmView(discord.ui.View):
     async def _confirm(self, interaction: discord.Interaction):
         srv = config.SERVERS[self.server_key]
 
-        if not await check_status(srv["ip"]):
+        if not await probe(self.server_key):
             await interaction.response.edit_message(
                 embed=discord.Embed(
                     title=f"ℹ️  {srv['name']} ya está OFFLINE",
@@ -328,7 +328,7 @@ class ShutdownConfirmView(discord.ui.View):
         await interaction.response.edit_message(
             embed=discord.Embed(
                 title=f"🌙  Enviando apagado → {srv['name']}",
-                description="Comando `sudo shutdown -h now` vía SSH...",
+                description=f"Comando `{config.shutdown_cmd(self.server_key)}` vía SSH...",
                 color=0xe67e22,
                 timestamp=datetime.now(),
             ),
@@ -458,7 +458,7 @@ class WOLPanel(discord.ui.View):
         async def _cb(interaction: discord.Interaction):
             srv = config.SERVERS[server_key]
 
-            if await check_status(srv["ip"]):
+            if await probe(server_key):
                 await interaction.response.send_message(
                     f"ℹ️ `{srv['name']}` ya está ONLINE.", ephemeral=True
                 )
@@ -498,5 +498,5 @@ class WOLPanel(discord.ui.View):
 # ──────────────────────────────────────────
 async def gather_statuses() -> dict:
     keys    = list(config.SERVERS.keys())
-    results = await asyncio.gather(*(check_status(config.SERVERS[k]["ip"]) for k in keys))
+    results = await asyncio.gather(*(probe(k) for k in keys))
     return dict(zip(keys, results))

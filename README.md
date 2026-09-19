@@ -12,7 +12,8 @@ A Discord bot for Wake-on-LAN and remote power management of homelab servers, wi
 - **Failsafe watchdog, per server:** if a server is down during the hours it should be online (its own `/schedule` window), the bot automatically re-sends WOL with debounced, low-impact ICMP checks and exponential-ish backoff — recovering from crashes or power outages with minimal downtime. Each server keeps its own failsafe state; toggleable from its `/schedule` panel.
 - **Maintenance coordination:** `wolctl.py` lets local automation wake a server with bounded retries and acquire expiring maintenance leases. While a lease is active, scheduled shutdown is postponed instead of interrupting Ansible or another long-running job.
 - **Power restore (`power-restore`):** automation that woke a server outside its uptime window can hand it back. The server is powered off again **only** if it is not inside its `/schedule` window and nobody else holds a maintenance lease — so a 3 AM backup does not leave a node running all day, and does not shut down a node the scheduler wanted online.
-- **Multi-server support:** tracks multiple homelab nodes (NAS, media server) with independent MAC/IP/SSH configuration per server. Every feature iterates over the server list — adding a node is a config entry, not a code change.
+- **Multi-server support:** tracks multiple homelab nodes (NAS, media server, Proxmox hypervisor) with independent MAC/IP/SSH configuration per server. Every feature iterates over the server list — adding a node is a config entry, not a code change.
+- **Cross-VLAN servers:** a node on a different VLAN than the bot gets two per-server overrides — `wol_target` (unicast magic packet, since limited broadcast is never routed) and `probe: "tcp"` (a TCP connect instead of ICMP, which inter-VLAN gateways typically drop). Remote shutdown/reboot commands are per-server too, so a node reachable only through a forced-command SSH key works like any other.
 
 ## 🧰 Stack
 
@@ -35,6 +36,7 @@ WOL-Bot/
 ├── maintenance.py # reservas IPC con TTL que bloquean apagados programados
 ├── schedule_store.py # persistencia del horario + aritmética de la franja (sin discord)
 ├── orchestrator.py# encendido con reintentos, espera de boot y power-restore
+├── schedule_store.py # franja horaria + persistencia, sin depender de discord
 ├── wolctl.py       # CLI local consumida por Updates-Bot y homelab-backup
 ├── views.py       # todas las Views/Modals de discord.ui
 └── main.py        # crear bot, registrar comandos, run
@@ -86,6 +88,22 @@ Exit code `7` means the shutdown was attempted and failed.
 
 Only call it for nodes you woke: the CLI decides whether powering off is *safe*,
 not whether it is *yours to do*.
+
+## 🧱 Servidores en otra VLAN
+
+El bot manda el magic packet por broadcast y sondea por ICMP, lo cual alcanza
+mientras todos los servidores compartan segmento con él. Un nodo en otra VLAN
+—el hipervisor Proxmox, en esta instalación— rompe los dos supuestos:
+
+| Supuesto | Por qué se rompe | Override |
+|---|---|---|
+| El broadcast llega | `255.255.255.255` es *limited broadcast*: ningún router lo reenvía, nunca. No hay regla de firewall que lo arregle. | `wol_target` → el paquete sale unicast a esa IP y el router sí lo rutea. La NIC lo reconoce igual: el magic packet se detecta por patrón dentro de la trama. |
+| El ping responde | El gateway descarta ICMP entre VLANs, así que el server figura caído siempre y el failsafe reenvía WOL en loop. | `probe: "tcp"` + `probe_port` → connect TCP. Además prueba algo más fuerte que el ping: que el servicio levantó. |
+
+Ambos necesitan acompañamiento del lado de la red (una ARP permanente y dos
+reglas de firewall) y del lado del servidor (usuario dedicado con clave de
+comando forzado para el apagado). El procedimiento completo, con verificación
+y rollback, está en **[`docs/RUNBOOK-proxmox.md`](docs/RUNBOOK-proxmox.md)**.
 
 ## 📄 License
 

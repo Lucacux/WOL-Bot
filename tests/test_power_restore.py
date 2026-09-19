@@ -53,7 +53,7 @@ class RestorePowerStateTests(unittest.IsolatedAsyncioTestCase):
     async def test_shuts_down_when_outside_window(self):
         with (
             patch("orchestrator.active_lease", return_value=None),
-            patch("orchestrator.check_status", new=AsyncMock(return_value=True)),
+            patch("orchestrator.probe", new=AsyncMock(return_value=True)),
             patch("orchestrator.should_be_online", return_value=(False, "fuera de la franja")),
             patch("orchestrator.ssh_shutdown", new=AsyncMock(return_value=True)) as shutdown,
         ):
@@ -65,7 +65,7 @@ class RestorePowerStateTests(unittest.IsolatedAsyncioTestCase):
     async def test_keeps_online_inside_window(self):
         with (
             patch("orchestrator.active_lease", return_value=None),
-            patch("orchestrator.check_status", new=AsyncMock(return_value=True)),
+            patch("orchestrator.probe", new=AsyncMock(return_value=True)),
             patch("orchestrator.should_be_online", return_value=(True, "dentro de la franja")),
             patch("orchestrator.ssh_shutdown", new=AsyncMock()) as shutdown,
         ):
@@ -76,7 +76,7 @@ class RestorePowerStateTests(unittest.IsolatedAsyncioTestCase):
     async def test_offline_server_is_left_alone(self):
         with (
             patch("orchestrator.active_lease", return_value=None),
-            patch("orchestrator.check_status", new=AsyncMock(return_value=False)),
+            patch("orchestrator.probe", new=AsyncMock(return_value=False)),
             patch("orchestrator.should_be_online") as window,
             patch("orchestrator.ssh_shutdown", new=AsyncMock()) as shutdown,
         ):
@@ -89,7 +89,7 @@ class RestorePowerStateTests(unittest.IsolatedAsyncioTestCase):
         lease = unittest.mock.Mock(owner="updates-bot-daily", remaining_seconds=900)
         with (
             patch("orchestrator.active_lease", return_value=lease),
-            patch("orchestrator.check_status", new=AsyncMock(return_value=True)),
+            patch("orchestrator.probe", new=AsyncMock(return_value=True)),
             patch("orchestrator.ssh_shutdown", new=AsyncMock()) as shutdown,
         ):
             result = await restore_power_state("nas", owner="homelab-backup")
@@ -101,7 +101,7 @@ class RestorePowerStateTests(unittest.IsolatedAsyncioTestCase):
         lease = unittest.mock.Mock(owner="homelab-backup", remaining_seconds=900)
         with (
             patch("orchestrator.active_lease", return_value=lease),
-            patch("orchestrator.check_status", new=AsyncMock(return_value=True)),
+            patch("orchestrator.probe", new=AsyncMock(return_value=True)),
             patch("orchestrator.should_be_online", return_value=(False, "fuera de la franja")),
             patch("orchestrator.ssh_shutdown", new=AsyncMock(return_value=True)),
         ):
@@ -111,7 +111,7 @@ class RestorePowerStateTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_shutdown_is_reported_as_an_error(self):
         with (
             patch("orchestrator.active_lease", return_value=None),
-            patch("orchestrator.check_status", new=AsyncMock(return_value=True)),
+            patch("orchestrator.probe", new=AsyncMock(return_value=True)),
             patch("orchestrator.should_be_online", return_value=(False, "fuera de la franja")),
             patch("orchestrator.ssh_shutdown", new=AsyncMock(return_value=False)),
         ):

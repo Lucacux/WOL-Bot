@@ -11,7 +11,7 @@ import asyncio
 import discord
 
 import config
-from network import check_status
+from network import probe
 from embeds import status_line
 
 
@@ -25,7 +25,7 @@ async def monitor_boot(message: discord.Message, server_key: str):
 
     while True:
         elapsed = int((datetime.now() - start).total_seconds())
-        online  = await check_status(ip)
+        online  = await probe(server_key)
         attempt += 1
 
         filled = min(12, attempt // 3)
@@ -73,7 +73,7 @@ async def monitor_reboot(message: discord.Message, server_key: str):
     # ── FASE 1: esperar que se apague ──
     went_down = False
     while (datetime.now() - start).total_seconds() < DOWN_TIMEOUT:
-        if not await check_status(ip):
+        if not await probe(server_key):
             went_down = True
             break
         embed = discord.Embed(
@@ -102,7 +102,7 @@ async def monitor_reboot(message: discord.Message, server_key: str):
     while (datetime.now() - phase2).total_seconds() < UP_TIMEOUT:
         attempt += 1
         elapsed = int((datetime.now() - start).total_seconds())
-        online  = await check_status(ip)
+        online  = await probe(server_key)
         filled  = min(12, attempt // 2)
         bar     = "█" * filled + "░" * (12 - filled)
 
@@ -148,7 +148,7 @@ async def monitor_shutdown(message: discord.Message, server_key: str):
     while (datetime.now() - start).total_seconds() < DOWN_TIMEOUT:
         attempt += 1
         elapsed = int((datetime.now() - start).total_seconds())
-        online  = await check_status(ip)
+        online  = await probe(server_key)
         filled  = min(12, attempt // 2)
         bar     = "█" * filled + "░" * (12 - filled)
 

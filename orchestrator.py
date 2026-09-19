@@ -7,7 +7,7 @@ from datetime import datetime
 
 import config
 from maintenance import active_lease
-from network import check_status, ssh_shutdown, wake
+from network import probe, ssh_shutdown, wake
 from schedule_store import should_be_online
 
 
@@ -55,8 +55,7 @@ async def ensure_online(
     if attempt_timeout < 0 or poll_seconds < 1 or boot_grace < 0:
         return EnsureOnlineResult(server_key, False, False, 0, "parámetros de espera inválidos")
 
-    ip = config.SERVERS[server_key]["ip"]
-    if await check_status(ip):
+    if await probe(server_key):
         return EnsureOnlineResult(server_key, True, True, 0, "ya estaba online")
 
     loop = asyncio.get_running_loop()
@@ -70,10 +69,10 @@ async def ensure_online(
         deadline = loop.time() + attempt_timeout
 
         while True:
-            if await check_status(ip):
+            if await probe(server_key):
                 if boot_grace:
                     await asyncio.sleep(boot_grace)
-                if await check_status(ip):
+                if await probe(server_key):
                     return EnsureOnlineResult(
                         server_key, True, False, sent, "encendido por WOL"
                     )
@@ -125,7 +124,7 @@ async def restore_power_state(
             f"reservado por {lease.owner} ({lease.remaining_seconds}s restantes)",
         )
 
-    if not await check_status(config.SERVERS[server_key]["ip"]):
+    if not await probe(server_key):
         return PowerRestoreResult(server_key, True, "already-offline", "ya estaba apagado")
 
     online_expected, reason = should_be_online(server_key, now=now)

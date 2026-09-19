@@ -18,8 +18,15 @@ from datetime import time as dtime
 import config
 
 
+def _seeded_default(server_key: str) -> dict:
+    """Default del horario para un servidor, con su semilla aplicada."""
+    cfg = dict(config.DEFAULT_SERVER_SCHEDULE)
+    cfg.update(config.SERVER_SCHEDULE_SEED.get(server_key, {}))
+    return cfg
+
+
 def _default_all() -> dict:
-    return {key: dict(config.DEFAULT_SERVER_SCHEDULE) for key in config.SERVERS}
+    return {key: _seeded_default(key) for key in config.SERVERS}
 
 
 def load_schedules() -> dict:
@@ -45,7 +52,7 @@ def load_schedules() -> dict:
 
     result = {}
     for key in config.SERVERS:
-        cfg = dict(config.DEFAULT_SERVER_SCHEDULE)
+        cfg = _seeded_default(key)
         stored = raw.get(key) if isinstance(raw, dict) else None
         if isinstance(stored, dict):
             cfg.update(stored)

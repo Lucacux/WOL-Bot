@@ -47,7 +47,41 @@ SERVERS = {
         "ip":    os.getenv('IP_MEDIA',    '192.168.2.10'),
         "emoji": os.getenv('EMOJI_MEDIA', '📺'),
     },
+    # El hipervisor NO vive en la misma VLAN que el bot, y eso rompe los dos
+    # supuestos que valen para nas/media (broadcast L2 + ICMP). De ahí los dos
+    # overrides; ver el bloque "SERVIDORES EN OTRA VLAN" más abajo.
+    "proxmox": {
+        "name":       os.getenv('NAME_PROXMOX',  'Proxmox (pve)'),
+        "mac":        os.getenv('MAC_PROXMOX',   '70:85:C2:BD:C8:53'),
+        "ip":         os.getenv('IP_PROXMOX',    '192.168.1.70'),
+        "emoji":      os.getenv('EMOJI_PROXMOX', '🖥️'),
+        "wol_target": os.getenv('WOL_TARGET_PROXMOX', '192.168.1.70'),
+        "probe":      os.getenv('PROBE_PROXMOX',      'tcp'),
+        "probe_port": _env_int('PROBE_PORT_PROXMOX',  22),
+    },
 }
+
+# ──────────────────────────────────────────
+# SERVIDORES EN OTRA VLAN
+# ──────────────────────────────────────────
+# El bot corre en 192.168.2.40 (VLAN 20, "servidores"). Un servidor en otra
+# VLAN necesita dos cosas que los locales no:
+#
+# 1. `wol_target` — el magic packet por defecto sale a 255.255.255.255, que es
+#    *limited broadcast*: ningún router lo reenvía, nunca. Apuntando el paquete
+#    a la IP del server sale como unicast y el router SÍ lo rutea. La NIC lo
+#    reconoce igual: el magic packet se detecta por patrón, no por ser
+#    broadcast. Requiere en el OpenWRT una ARP permanente para esa IP (con la
+#    máquina apagada no hay quién responda el ARP) y una regla que deje pasar
+#    UDP/9 desde el bot. Sin `wol_target` se usa el broadcast de siempre.
+#
+# 2. `probe` — el gateway descarta el ICMP entre VLANs, así que un ping da
+#    siempre "caído" y el failsafe quedaría reenviando WOL en loop. Con
+#    `probe: "tcp"` la sonda es un connect a `probe_port`, que además prueba
+#    algo más fuerte: que el sshd levantó, no que el kernel contesta ARP.
+#    Sin `probe` se usa ICMP, como siempre.
+PROBE_TCP_TIMEOUT = _env_int('PROBE_TCP_TIMEOUT', 3)  # segundos por intento
+WOL_DEFAULT_PORT  = _env_int('WOL_DEFAULT_PORT', 9)
 
 # ── SSH por servidor (shutdown / reboot) ──
 # NAS cae por defecto a la misma credencial que Media salvo override explícito,
@@ -55,6 +89,13 @@ SERVERS = {
 _SSH_USER_MEDIA = os.getenv('SSH_USER_MEDIA', 'luca')
 _SSH_KEY_MEDIA  = os.getenv('SSH_KEY_MEDIA',  os.path.expanduser('~/.ssh/id_ed25519_wol'))
 _SSH_PORT_MEDIA = os.getenv('SSH_PORT_MEDIA', '2222')
+
+# Comandos remotos por defecto. Un servidor puede pisarlos: el Proxmox entra con
+# una clave de *comando forzado*, que no ejecuta lo que se le mande sino que lee
+# $SSH_ORIGINAL_COMMAND y solo acepta las palabras `halt` y `reboot`. Así la
+# clave del bot no sirve para nada más que prender y apagar.
+DEFAULT_SHUTDOWN_CMD = "sudo shutdown -h now"
+DEFAULT_REBOOT_CMD   = "sudo shutdown -r now"
 
 SSH_CONFIG = {
     "nas": {
@@ -67,7 +108,22 @@ SSH_CONFIG = {
         "key":  _SSH_KEY_MEDIA,
         "port": _SSH_PORT_MEDIA,
     },
+    "proxmox": {
+        "user":         os.getenv('SSH_USER_PROXMOX', 'wol-bot'),
+        "key":          os.getenv('SSH_KEY_PROXMOX',  _SSH_KEY_MEDIA),
+        "port":         os.getenv('SSH_PORT_PROXMOX', '22'),
+        "shutdown_cmd": os.getenv('SSH_SHUTDOWN_CMD_PROXMOX', 'halt'),
+        "reboot_cmd":   os.getenv('SSH_REBOOT_CMD_PROXMOX',   'reboot'),
+    },
 }
+
+
+def shutdown_cmd(server_key: str) -> str:
+    return SSH_CONFIG[server_key].get("shutdown_cmd") or DEFAULT_SHUTDOWN_CMD
+
+
+def reboot_cmd(server_key: str) -> str:
+    return SSH_CONFIG[server_key].get("reboot_cmd") or DEFAULT_REBOOT_CMD
 
 # ──────────────────────────────────────────
 # SCHEDULE (horario automático por servidor)
@@ -102,6 +158,20 @@ DEFAULT_SERVER_SCHEDULE = {
     "last_shutdown_date":      None,
     "shutdown_cancelled_date": None,
     "failsafe_enabled":        True,   # watchdog WOL dentro de la franja activa
+}
+
+# Semilla por servidor: pisa DEFAULT_SERVER_SCHEDULE la PRIMERA vez que el
+# servidor aparece en schedule.json. Una vez guardado, manda lo persistido —
+# si pausás el horario desde /schedule, la semilla no lo vuelve a encender.
+# El Proxmox arranca con la franja puesta y activa, por decisión explícita:
+# el resto de los servers quedaron opt-in porque se agregaron antes de que el
+# horario estuviera probado.
+SERVER_SCHEDULE_SEED = {
+    "proxmox": {
+        "enabled":       True,
+        "wake_time":     os.getenv('WAKE_TIME_PROXMOX',     '08:00'),
+        "shutdown_time": os.getenv('SHUTDOWN_TIME_PROXMOX', '23:00'),
+    },
 }
 
 # ──────────────────────────────────────────

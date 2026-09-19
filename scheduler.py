@@ -23,7 +23,7 @@ from embeds import (
 )
 from maintenance import active_lease
 from monitors import monitor_boot
-from network import check_status, is_server_down, ssh_shutdown, wake
+from network import is_server_down, probe, ssh_shutdown, wake
 from schedule_store import (  # noqa: F401  (reexport para main.py y views.py)
     in_uptime_window,
     load_schedule,
@@ -158,7 +158,7 @@ async def _process_schedule(bot, server_key: str, cfg: dict, now: datetime) -> b
         cfg["last_wake_date"] = today
         dirty = True
 
-        online = await check_status(srv["ip"])
+        online = await probe(server_key)
         if not online:
             wol_ok  = await wake(server_key)
             channel = bot.get_channel(config.CHANNEL_ID)

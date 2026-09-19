@@ -7,7 +7,7 @@ from orchestrator import ensure_online
 class EnsureOnlineTests(unittest.IsolatedAsyncioTestCase):
     async def test_already_online_does_not_send_wol(self):
         with (
-            patch("orchestrator.check_status", new=AsyncMock(return_value=True)),
+            patch("orchestrator.probe", new=AsyncMock(return_value=True)),
             patch("orchestrator.wake", new=AsyncMock()) as wake,
         ):
             result = await ensure_online("nas", boot_grace=0)
@@ -18,7 +18,7 @@ class EnsureOnlineTests(unittest.IsolatedAsyncioTestCase):
     async def test_wakes_and_confirms_after_grace(self):
         statuses = AsyncMock(side_effect=[False, True, True])
         with (
-            patch("orchestrator.check_status", new=statuses),
+            patch("orchestrator.probe", new=statuses),
             patch("orchestrator.wake", new=AsyncMock(return_value=True)) as wake,
         ):
             result = await ensure_online(
@@ -31,7 +31,7 @@ class EnsureOnlineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_exhausts_bounded_attempts(self):
         with (
-            patch("orchestrator.check_status", new=AsyncMock(return_value=False)),
+            patch("orchestrator.probe", new=AsyncMock(return_value=False)),
             patch("orchestrator.wake", new=AsyncMock(return_value=True)) as wake,
         ):
             result = await ensure_online(
