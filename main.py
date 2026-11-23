@@ -42,11 +42,25 @@ async def on_ready():
     await channel.send(embed=build_panel_embed(statuses), view=WOLPanel(statuses))
 
 
+async def _reply_after_probe(interaction: discord.Interaction, build) -> None:
+    """Acusa recibo antes de sondear y manda el panel como followup.
+
+    Discord da 3 s para responder una interacción. `gather_statuses()` tarda lo
+    que tarde el sondeo más lento: con un server en otra VLAN apagado, el TCP
+    probe espera `PROBE_TCP_TIMEOUT` (3 s) y la interacción vence antes de
+    responder (`404 Unknown interaction`, "The application did not respond").
+    El `defer` corta esa dependencia: el sondeo puede tardar lo que necesite.
+    """
+    await interaction.response.defer(thinking=True)
+    statuses = await gather_statuses()
+    embed, view = build(statuses)
+    await interaction.followup.send(embed=embed, view=view)
+
+
 @tree.command(name="wol", description="Abre el panel Wake-on-LAN")
 async def wol_command(interaction: discord.Interaction):
-    statuses = await gather_statuses()
-    await interaction.response.send_message(
-        embed=build_panel_embed(statuses), view=WOLPanel(statuses)
+    await _reply_after_probe(
+        interaction, lambda st: (build_panel_embed(st), WOLPanel(st))
     )
 
 
@@ -62,24 +76,26 @@ async def schedule_command(interaction: discord.Interaction):
 
 @tree.command(name="reboot", description="Reiniciar uno de los servidores (vía SSH)")
 async def reboot_command(interaction: discord.Interaction):
-    statuses = await gather_statuses()
-    embed = build_control_embed(
-        "🔄  Reboot Control",
-        "Elegí el servidor a reiniciar. Solo se pueden reiniciar los ONLINE.",
-        statuses,
-    )
-    await interaction.response.send_message(embed=embed, view=RebootPanel(statuses))
+    await _reply_after_probe(interaction, lambda st: (
+        build_control_embed(
+            "🔄  Reboot Control",
+            "Elegí el servidor a reiniciar. Solo se pueden reiniciar los ONLINE.",
+            st,
+        ),
+        RebootPanel(st),
+    ))
 
 
 @tree.command(name="shutdown", description="Apagar uno de los servidores (vía SSH)")
 async def shutdown_command(interaction: discord.Interaction):
-    statuses = await gather_statuses()
-    embed = build_control_embed(
-        "🌙  Shutdown Control",
-        "Elegí el servidor a apagar. Solo se pueden apagar los ONLINE.",
-        statuses,
-    )
-    await interaction.response.send_message(embed=embed, view=ShutdownPanel(statuses))
+    await _reply_after_probe(interaction, lambda st: (
+        build_control_embed(
+            "🌙  Shutdown Control",
+            "Elegí el servidor a apagar. Solo se pueden apagar los ONLINE.",
+            st,
+        ),
+        ShutdownPanel(st),
+    ))
 
 
 if __name__ == "__main__":
