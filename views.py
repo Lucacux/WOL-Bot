@@ -65,7 +65,9 @@ class TimeInputModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         val = self.time_input.value.strip()
         try:
-            parse_hhmm(val)
+            # Normalizar a HH:MM: "0:00" y "00:00" son la misma hora, y el panel
+            # compara horarios guardados (p. ej. encendido == apagado ⇒ 24 h).
+            val = parse_hhmm(val).strftime("%H:%M")
         except Exception:
             await interaction.response.send_message(
                 "❌ Formato inválido. Usá `HH:MM` — por ejemplo `06:30`.",

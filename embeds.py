@@ -9,6 +9,7 @@ from datetime import datetime
 import discord
 
 import config
+from schedule_store import parse_hhmm
 
 
 def status_line(online: bool) -> str:
@@ -66,7 +67,10 @@ def build_schedule_embed(server_key: str, cfg: dict) -> discord.Embed:
         timestamp=datetime.now(),
     )
     embed.add_field(name="⏰  Encendido", value=f"`{cfg['wake_time']}`",     inline=True)
-    always_on = cfg["wake_time"] == cfg["shutdown_time"]
+    try:  # por hora, no por texto: "0:00" == "00:00" (horarios guardados antes de normalizar)
+        always_on = parse_hhmm(cfg["wake_time"]) == parse_hhmm(cfg["shutdown_time"])
+    except (KeyError, ValueError):
+        always_on = False
     embed.add_field(
         name="🌙  Apagado",
         value="♾️ **Nunca** (24 h)" if always_on else f"`{cfg['shutdown_time']}`",

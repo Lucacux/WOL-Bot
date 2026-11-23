@@ -95,6 +95,11 @@ class ScheduleEmbed24h(unittest.TestCase):
         self.assertIn("Nunca", fields["🌙  Apagado"])
         self.assertIn("cualquier momento", fields["🛟  Failsafe (watchdog WOL)"])
 
+    def test_unpadded_hour_still_counts_as_24h(self):
+        # Caso real del 2026-11-23: el modal guardó "0:00" y el apagado "00:00".
+        fields = self._fields(_cfg("0:00", "00:00"))
+        self.assertIn("Nunca", fields["🌙  Apagado"])
+
     def test_normal_window_shows_time(self):
         fields = self._fields(_cfg("08:00", "22:35"))
         self.assertEqual(fields["🌙  Apagado"], "`22:35`")
