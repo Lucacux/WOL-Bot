@@ -207,9 +207,12 @@ class RebootConfirmView(discord.ui.View):
 
     async def _confirm(self, interaction: discord.Interaction):
         srv = config.SERVERS[self.server_key]
+        # Acusar recibo antes de sondear: con el server apagado el probe tarda
+        # lo mismo que el plazo de Discord (3 s) y la interacción vencería.
+        await interaction.response.defer()
 
         if not await probe(self.server_key):
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 embed=discord.Embed(
                     title=f"ℹ️  {srv['name']} está OFFLINE",
                     description="No se puede reiniciar un servidor apagado. Usá el panel WOL para despertarlo.",
@@ -219,7 +222,7 @@ class RebootConfirmView(discord.ui.View):
             )
             return
 
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             embed=discord.Embed(
                 title=f"🔄  Enviando reinicio → {srv['name']}",
                 description=f"Comando `{config.reboot_cmd(self.server_key)}` vía SSH...",
@@ -313,9 +316,12 @@ class ShutdownConfirmView(discord.ui.View):
 
     async def _confirm(self, interaction: discord.Interaction):
         srv = config.SERVERS[self.server_key]
+        # Acusar recibo antes de sondear: con el server apagado el probe tarda
+        # lo mismo que el plazo de Discord (3 s) y la interacción vencería.
+        await interaction.response.defer()
 
         if not await probe(self.server_key):
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 embed=discord.Embed(
                     title=f"ℹ️  {srv['name']} ya está OFFLINE",
                     description="El servidor ya está apagado.",
@@ -325,7 +331,7 @@ class ShutdownConfirmView(discord.ui.View):
             )
             return
 
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             embed=discord.Embed(
                 title=f"🌙  Enviando apagado → {srv['name']}",
                 description=f"Comando `{config.shutdown_cmd(self.server_key)}` vía SSH...",
@@ -457,15 +463,19 @@ class WOLPanel(discord.ui.View):
     def _make_wake_callback(self, server_key: str):
         async def _cb(interaction: discord.Interaction):
             srv = config.SERVERS[server_key]
+            # Acusar recibo antes de sondear: con el server apagado el probe
+            # tarda lo mismo que el plazo de Discord (3 s), la interacción
+            # vencía y el botón tiraba "Unknown interaction".
+            await interaction.response.defer(ephemeral=True, thinking=True)
 
             if await probe(server_key):
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"ℹ️ `{srv['name']}` ya está ONLINE.", ephemeral=True
                 )
                 return
 
             if not await wake(server_key):
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "❌ No se encontró `wakeonlan`.\nInstalá: `sudo pacman -S wakeonlan`",
                     ephemeral=True,
                 )
@@ -479,7 +489,7 @@ class WOLPanel(discord.ui.View):
             )
             embed.set_footer(text="Monitoreando arranque...")
 
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"⚡ Despertando **{srv['name']}**...", ephemeral=True
             )
             monitor_msg = await interaction.channel.send(embed=embed)

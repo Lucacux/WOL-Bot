@@ -109,11 +109,25 @@ def send_wol(mac: str, target: str | None = None, port: int | None = None) -> bo
     return r.returncode == 0
 
 
+def wol_targets(server_key: str) -> list[str | None]:
+    """Destinos del magic packet de un server. `wol_target` acepta varios
+    separados por coma; sin `wol_target`, el broadcast de siempre."""
+    raw = config.SERVERS[server_key].get("wol_target")
+    if not raw:
+        return [None]
+    return [t.strip() for t in raw.split(",") if t.strip()]
+
+
 async def wake(server_key: str) -> bool:
+    """Manda el magic packet a CADA destino configurado y devuelve True si
+    al menos uno salió. Varios destinos cubren varios caminos (ver
+    "SERVIDORES EN OTRA VLAN" en config.py): el que no aplica, no molesta."""
     srv = config.SERVERS[server_key]
-    return await asyncio.to_thread(
-        send_wol, srv["mac"], srv.get("wol_target"), srv.get("wol_port")
-    )
+    results = [
+        await asyncio.to_thread(send_wol, srv["mac"], target, srv.get("wol_port"))
+        for target in wol_targets(server_key)
+    ]
+    return any(results)
 
 
 # ──────────────────────────────────────────

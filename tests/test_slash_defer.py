@@ -43,3 +43,61 @@ class SlashCommandsDeferFirst(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ButtonsDeferFirst(unittest.TestCase):
+    """Mismo plazo de 3 s para los botones: el de despertar sondeaba antes de
+    responder y con el pve apagado tiraba "Unknown interaction"."""
+
+    def _inter(self, calls):
+        inter = MagicMock()
+        inter.response.defer = AsyncMock(side_effect=lambda **kw: calls.append("defer"))
+        inter.response.send_message = AsyncMock(side_effect=lambda *a, **kw: calls.append("send_message"))
+        inter.response.edit_message = AsyncMock(side_effect=lambda *a, **kw: calls.append("edit_message"))
+        inter.followup.send = AsyncMock(side_effect=lambda *a, **kw: calls.append("followup"))
+        inter.edit_original_response = AsyncMock(side_effect=lambda *a, **kw: calls.append("edit_original"))
+        inter.channel.send = AsyncMock(side_effect=lambda *a, **kw: calls.append("channel"))
+        return inter
+
+    def test_wake_button_defers_before_probe(self):
+        import views
+        calls = []
+        inter = self._inter(calls)
+
+        async def probe(_):
+            calls.append("probe")
+            return False
+
+        async def wake(_):
+            calls.append("wake")
+            return True
+
+        async def run():
+            panel = views.WOLPanel({k: False for k in main.config.SERVERS})
+            with patch("views.probe", new=probe), patch("views.wake", new=wake), \
+                 patch("views.monitor_boot", new=AsyncMock()):
+                await panel._make_wake_callback("proxmox")(inter)
+
+        asyncio.run(run())
+        self.assertEqual(calls[:4], ["defer", "probe", "wake", "followup"])
+        inter.response.send_message.assert_not_awaited()
+
+    def test_confirm_buttons_defer_before_probe(self):
+        import views
+        for cls in (views.RebootConfirmView, views.ShutdownConfirmView):
+            with self.subTest(view=cls.__name__):
+                calls = []
+                inter = self._inter(calls)
+
+                async def probe(_):
+                    calls.append("probe")
+                    return False  # offline: rama que antes vencía
+
+                async def run():
+                    view = cls("proxmox")
+                    with patch("views.probe", new=probe):
+                        await view._confirm(inter)
+
+                asyncio.run(run())
+                self.assertEqual(calls, ["defer", "probe", "edit_original"])
+                inter.response.edit_message.assert_not_awaited()

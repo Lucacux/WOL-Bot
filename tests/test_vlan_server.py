@@ -31,12 +31,28 @@ class WolTargetTests(unittest.TestCase):
             ["/usr/bin/wakeonlan", "-i", "192.168.1.70", "-p", "9", "AA:BB:CC:DD:EE:FF"],
         )
 
-    def test_proxmox_wake_sends_unicast(self):
+    def test_proxmox_wake_sends_subnet_broadcast_and_unicast(self):
+        """Con pata WiFi en la VLAN del pve, el unicast no sale (ARP sin
+        respuesta con la máquina apagada): el broadcast de subred es el que
+        lo despierta. El unicast queda para cuando la ruta va por el router."""
         with patch("network.send_wol", return_value=True) as send:
-            asyncio.run(network.wake("proxmox"))
-        send.assert_called_once_with(
-            config.SERVERS["proxmox"]["mac"], "192.168.1.70", None
+            self.assertTrue(asyncio.run(network.wake("proxmox")))
+        mac = config.SERVERS["proxmox"]["mac"]
+        self.assertEqual(
+            [c.args for c in send.call_args_list],
+            [(mac, "192.168.1.255", None), (mac, "192.168.1.70", None)],
         )
+
+    def test_wake_ok_if_any_target_sent(self):
+        with patch("network.send_wol", side_effect=[False, True]):
+            self.assertTrue(asyncio.run(network.wake("proxmox")))
+        with patch("network.send_wol", return_value=False):
+            self.assertFalse(asyncio.run(network.wake("proxmox")))
+
+    def test_local_servers_keep_single_broadcast(self):
+        with patch("network.send_wol", return_value=True) as send:
+            asyncio.run(network.wake("media"))
+        send.assert_called_once_with(config.SERVERS["media"]["mac"], None, None)
 
 
 class ProbeDispatchTests(unittest.TestCase):

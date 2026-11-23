@@ -55,7 +55,7 @@ SERVERS = {
         "mac":        os.getenv('MAC_PROXMOX',   '70:85:C2:BD:C8:53'),
         "ip":         os.getenv('IP_PROXMOX',    '192.168.1.70'),
         "emoji":      os.getenv('EMOJI_PROXMOX', '🖥️'),
-        "wol_target": os.getenv('WOL_TARGET_PROXMOX', '192.168.1.70'),
+        "wol_target": os.getenv('WOL_TARGET_PROXMOX', '192.168.1.255,192.168.1.70'),
         "probe":      os.getenv('PROBE_PROXMOX',      'tcp'),
         "probe_port": _env_int('PROBE_PORT_PROXMOX',  22),
     },
@@ -74,6 +74,17 @@ SERVERS = {
 #    broadcast. Requiere en el OpenWRT una ARP permanente para esa IP (con la
 #    máquina apagada no hay quién responda el ARP) y una regla que deje pasar
 #    UDP/9 desde el bot. Sin `wol_target` se usa el broadcast de siempre.
+#
+#    ⚠️ Eso deja de valer si server-mbp tiene una pata en la VLAN del server:
+#    hoy `wlp3s0` está en 192.168.1.0/24, así que la ruta a .1.70 sale directo
+#    por el WiFi y es server-mbp el que tiene que resolver el ARP. Con el pve
+#    apagado nadie responde, el vecino queda INCOMPLETE y el unicast NUNCA
+#    sale (wakeonlan igual dice "sent=1"). Verificado el 2026-11-22: unicast
+#    → nada; broadcast de subred 192.168.1.255 → online en 35 s.
+#    Por eso `wol_target` acepta varios destinos separados por coma y el
+#    Proxmox usa los dos: el broadcast de subred para cuando hay pata WiFi, y
+#    el unicast para cuando la ruta vuelve a ir por el router (que no reenvía
+#    broadcasts dirigidos, pero sí tiene la ARP permanente).
 #
 # 2. `probe` — el gateway descarta el ICMP entre VLANs, así que un ping da
 #    siempre "caído" y el failsafe quedaría reenviando WOL en loop. Con
