@@ -191,6 +191,14 @@ async def _process_schedule(bot, server_key: str, cfg: dict, now: datetime) -> b
                     ))
 
     # ── APAGADO ──
+    # wake_time == shutdown_time ⇒ franja de 24 h: nunca se apaga por horario.
+    # Coherente con in_uptime_window (que ya lo toma como "siempre ON", así el
+    # failsafe vigila todo el día). Sin esta salida, `shut_t <= wake_t` lo leía
+    # como "cruza medianoche" y apagaba cada día a esa hora, para que después
+    # el failsafe lo volviera a despertar: un reinicio diario con alertas.
+    if shut_t == wake_t:
+        return dirty
+
     # El apagado se ancla a la FECHA real del último encendido, no a "hoy a las
     # shut_t". Si shutdown_time <= wake_time la ventana cruza medianoche y el
     # apagado cae al día siguiente. Las guardas de "ya resuelto" se anclan a la

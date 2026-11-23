@@ -66,7 +66,12 @@ def build_schedule_embed(server_key: str, cfg: dict) -> discord.Embed:
         timestamp=datetime.now(),
     )
     embed.add_field(name="⏰  Encendido", value=f"`{cfg['wake_time']}`",     inline=True)
-    embed.add_field(name="🌙  Apagado",   value=f"`{cfg['shutdown_time']}`", inline=True)
+    always_on = cfg["wake_time"] == cfg["shutdown_time"]
+    embed.add_field(
+        name="🌙  Apagado",
+        value="♾️ **Nunca** (24 h)" if always_on else f"`{cfg['shutdown_time']}`",
+        inline=True,
+    )
     embed.add_field(name="​",  value="​",              inline=True)
 
     # Las marcas de apagado/cancelado se anclan a la ventana (last_wake_date),
@@ -91,8 +96,9 @@ def build_schedule_embed(server_key: str, cfg: dict) -> discord.Embed:
         name="🛟  Failsafe (watchdog WOL)",
         value=(
             f"{'🟢 **Activo**' if fs else '⏸️  **Pausado**'} — reenciende solo "
-            f"**{srv['name']}** si se cae dentro de la franja "
-            f"`{cfg['wake_time']}`–`{cfg['shutdown_time']}`."
+            f"**{srv['name']}** si se cae "
+            + ("**en cualquier momento** (franja de 24 h)." if always_on else
+               f"dentro de la franja `{cfg['wake_time']}`–`{cfg['shutdown_time']}`.")
         ),
         inline=False,
     )
